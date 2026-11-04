@@ -1,0 +1,17 @@
+name: radio_saya
+description: Radio streaming sederhana tanpa iklan.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  just_audio: ^0.9.40
+  audio_session: ^0.1.21
+  just_audio_background: ^0.0.1-beta.17
+
+flutter:
+  uses-material-design: true
