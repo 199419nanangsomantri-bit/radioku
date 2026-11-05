@@ -14,6 +14,9 @@ dependencies:
   just_audio_background: ^0.0.1-beta.17
   shared_preferences: ^2.3.2
   http: ^1.2.2
+  zeba_academy_waveforms: ^1.0.0
+  image_picker: ^1.1.2
+  path_provider: ^2.1.4
 
 flutter:
   uses-material-design: true
