@@ -155,6 +155,12 @@ class _RadioPageState extends State<RadioPage>
 
   late TabController _tabController;
 
+  // --- Pencarian ---
+  final TextEditingController _searchController = TextEditingController();
+  bool _isSearching = false; // true = sedang memanggil API
+  List<StationStatus>? _searchResults; // null = tidak ada hasil pencarian
+  int _searchToken = 0; // mencegah hasil lama muncul setelah di-clear
+
   @override
   void initState() {
     super.initState();
@@ -457,6 +463,114 @@ class _RadioPageState extends State<RadioPage>
         Station('Sunda Radio', 'https://sundaradio.com/stream'),
       ];
 
+  // ---------------- PENCARIAN ----------------
+  Future<void> _searchStations() async {
+    final keyword = _searchController.text.trim();
+    if (keyword.isEmpty || _isSearching) return;
+    FocusScope.of(context).unfocus();
+
+    final token = ++_searchToken;
+    setState(() => _isSearching = true);
+
+    try {
+      final uri = Uri.https(
+        'de1.api.radio-browser.info',
+        '/json/stations/search',
+        {
+          'countrycode': 'ID',
+          'name': keyword,
+          'hidebroken': 'true',
+          'limit': '100',
+          'order': 'votes',
+          'reverse': 'true',
+        },
+      );
+      final response = await http.get(
+        uri,
+        headers: {'User-Agent': _userAgent},
+      ).timeout(const Duration(seconds: 20));
+
+      if (token != _searchToken || !mounted) return;
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+
+      final List<dynamic> data = jsonDecode(response.body);
+      final seen = <String>{};
+      final results = <StationStatus>[];
+      for (final e in data) {
+        final map = e as Map<String, dynamic>;
+        final url = (map['url_resolved'] as String? ?? '').trim();
+        if (url.isEmpty || !seen.add(url)) continue;
+        final rawName = (map['name'] as String? ?? '').trim();
+        results.add(StationStatus(
+          Station(
+            rawName.isEmpty ? 'Tanpa Nama' : rawName,
+            url,
+            favicon: map['favicon'] as String?,
+            tags: map['tags'] as String?,
+          ),
+        ));
+      }
+
+      setState(() {
+        _searchResults = results;
+        _isSearching = false;
+      });
+    } catch (_) {
+      if (token != _searchToken || !mounted) return;
+      setState(() => _isSearching = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Gagal mencari. Periksa koneksi internet.')),
+      );
+    }
+  }
+
+  Future<void> _saveSearchResultsToPlaylist() async {
+    final results = _searchResults;
+    if (results == null || results.isEmpty) return;
+
+    // Jangan ubah _statuses saat scan berjalan (scan sedang mengiterasinya)
+    if (_isScanning) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Tunggu scan selesai atau hentikan scan dulu.')),
+      );
+      return;
+    }
+
+    final existing = _statuses.map((s) => s.station.url).toSet();
+    final toAdd =
+        results.where((r) => !existing.contains(r.station.url)).toList();
+    final skipped = results.length - toAdd.length;
+
+    if (toAdd.isNotEmpty) {
+      setState(() => _statuses.addAll(toAdd));
+      await _saveStations();
+    }
+    _clearSearch();
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+            '${toAdd.length} stasiun ditambahkan'
+            '${skipped > 0 ? ', $skipped sudah ada' : ''}.'),
+      ),
+    );
+  }
+
+  void _clearSearch() {
+    _searchToken++;
+    _searchController.clear();
+    if (!mounted) return;
+    setState(() {
+      _isSearching = false;
+      _searchResults = null;
+    });
+  }
+
   // ---------------- PLAYER ----------------
   bool get _isPlaying {
     return _player.playerState.playing &&
@@ -547,7 +661,8 @@ class _RadioPageState extends State<RadioPage>
           DateTime.now().difference(p) > const Duration(seconds: 30)) {
         final st = _statuses.firstWhere(
           (s) => s.station.url == _currentPlayingUrl,
-          orElse: () => _statuses.first,
+          orElse: () => StationStatus(
+              Station(_playingStationName ?? '', _currentPlayingUrl!)),
         );
         _playStation(st.station);
       } else {
@@ -612,6 +727,7 @@ class _RadioPageState extends State<RadioPage>
   @override
   void dispose() {
     _tabController.dispose();
+    _searchController.dispose();
     for (final s in _subs) {
       s.cancel();
     }
@@ -919,6 +1035,65 @@ class _RadioPageState extends State<RadioPage>
                 ),
               ),
 
+              // Kotak pencarian
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _searchController,
+                        textInputAction: TextInputAction.search,
+                        onSubmitted: (_) => _searchStations(),
+                        onChanged: (_) => setState(() {}),
+                        style: TextStyle(
+                            color: hasBackground ? Colors.white : null),
+                        cursorColor: hasBackground ? Colors.white : null,
+                        decoration: InputDecoration(
+                          hintText: 'Cari radio lokal (mis. Ciamis, Bandung)',
+                          hintStyle: TextStyle(
+                              color: hasBackground ? Colors.white70 : null),
+                          prefixIcon: Icon(Icons.search,
+                              color: hasBackground ? Colors.white70 : null),
+                          suffixIcon: (_searchController.text.isNotEmpty ||
+                                  _searchResults != null)
+                              ? IconButton(
+                                  tooltip: 'Hapus pencarian',
+                                  icon: Icon(Icons.close,
+                                      color: hasBackground
+                                          ? Colors.white70
+                                          : null),
+                                  onPressed: _clearSearch,
+                                )
+                              : null,
+                          isDense: true,
+                          filled: true,
+                          fillColor: hasBackground
+                              ? Colors.white.withOpacity(0.15)
+                              : cs.surfaceContainerHighest,
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(24),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filled(
+                      tooltip: 'Cari',
+                      onPressed: _isSearching ? null : _searchStations,
+                      icon: _isSearching
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.search),
+                    ),
+                  ],
+                ),
+              ),
+
               // Tombol scan
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
@@ -975,19 +1150,120 @@ class _RadioPageState extends State<RadioPage>
 
               // Konten tab
               Expanded(
-                child: TabBarView(
-                  controller: _tabController,
-                  children: [
-                    _buildStationListWithBg(_statuses, cs, hasBackground),
-                    _buildStationListWithBg(
-                        favoriteList, cs, hasBackground),
-                  ],
-                ),
+                child: _searchResults != null
+                    ? _buildSearchResults(cs, hasBackground)
+                    : TabBarView(
+                        controller: _tabController,
+                        children: [
+                          _buildStationListWithBg(
+                              _statuses, cs, hasBackground),
+                          _buildStationListWithBg(
+                              favoriteList, cs, hasBackground),
+                        ],
+                      ),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSearchResults(ColorScheme cs, bool hasBackground) {
+    final results = _searchResults ?? const <StationStatus>[];
+    final existing = _statuses.map((s) => s.station.url).toSet();
+    final newCount =
+        results.where((r) => !existing.contains(r.station.url)).length;
+    final mutedColor = hasBackground ? Colors.white70 : cs.onSurfaceVariant;
+    final textColor = hasBackground ? Colors.white : null;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${results.length} hasil • $newCount baru',
+                  style: TextStyle(fontSize: 12, color: mutedColor),
+                ),
+              ),
+              FilledButton.icon(
+                style: hasBackground
+                    ? FilledButton.styleFrom(
+                        disabledBackgroundColor: Colors.white24,
+                        disabledForegroundColor: Colors.white54,
+                      )
+                    : null,
+                onPressed: (newCount == 0 || _isScanning)
+                    ? null
+                    : _saveSearchResultsToPlaylist,
+                icon: const Icon(Icons.playlist_add),
+                label: const Text('Simpan ke daftar'),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: results.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      'Tidak ada stasiun ditemukan.\nCoba kata kunci lain.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: mutedColor),
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: results.length,
+                  itemBuilder: (context, i) {
+                    final st = results[i].station;
+                    final isCurrent = st.url == _currentPlayingUrl;
+                    final already = existing.contains(st.url);
+                    final tags = (st.tags ?? '').trim();
+                    return ListTile(
+                      leading: Icon(
+                        Icons.radio,
+                        color: hasBackground ? Colors.amber : cs.primary,
+                      ),
+                      title: Text(
+                        st.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: textColor,
+                          fontWeight:
+                              isCurrent ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                      subtitle: Text(
+                        already
+                            ? 'Sudah ada di daftar'
+                            : (tags.isEmpty ? 'Hasil pencarian' : tags),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: already
+                              ? (hasBackground ? Colors.amber : cs.primary)
+                              : mutedColor,
+                        ),
+                      ),
+                      trailing: Icon(
+                        isCurrent && _isPlaying
+                            ? Icons.graphic_eq
+                            : Icons.play_arrow,
+                        color: textColor,
+                      ),
+                      onTap: () => _playStation(st),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 
